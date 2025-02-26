@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -28,9 +28,52 @@
     }
     localStorage.setItem("tm_yt_api_key", API_KEY);
   }
+
   function revokeAPIKey() {
     localStorage.removeItem("tm_yt_api_key");
   }
+
+  class Mutex {
+    constructor() {
+      this._queue = [];
+      this._isLocked = false;
+    }
+
+    async lock() {
+      const ticket = new Promise(resolve => this._queue.push(resolve));
+      if (!this._isLocked) {
+        this._dispatchNext();
+      }
+      await ticket;
+    }
+
+    unlock() {
+      if (!this._isLocked) {
+        throw new Error("Cannot unlock an unlocked mutex.");
+      }
+      this._dispatchNext();
+    }
+
+    _dispatchNext() {
+      if (this._queue.length > 0) {
+        this._isLocked = true;
+        const nextResolve = this._queue.shift();
+        nextResolve(); // Resume the next waiting task
+      } else {
+        this._isLocked = false;
+      }
+    }
+  }
+  const apiMu = new Mutex();
+  async function apiFetch(url, options = {}) {
+    apiMu.lock();
+    try {
+      return await fetch(url, options);
+    } finally {
+      apiMu.unlock();
+    }
+  }
+
   async function processAPIResponse(response) {
 
     const obj = await response.json();
@@ -49,7 +92,7 @@
     logError(`API Error: ${error.message}`, { showAlert: true, throwError: true });
 
   }
-  
+
   const deprecatedSpan = document.createElement("span");
   deprecatedSpan.title = "This script is deprecated!";
   deprecatedSpan.textContent = "⚠️";
@@ -79,6 +122,28 @@
     }
     const decompressed = pako.ungzip(bytes, { to: 'string' });
     return JSON.parse(decompressed);
+  }
+
+  function isBase64(str) {
+    if (typeof str !== 'string') return false;
+
+    // Remove any line breaks for validation
+    const cleanedStr = str.replace(/\s+/g, '');
+
+    // Base64 length must be a multiple of 4
+    if (!cleanedStr || cleanedStr.length % 4 !== 0) return false;
+
+    // Regular expression for Base64
+    const base64Regex = /^[A-Za-z0-9+/]+={0,2}$/;
+
+    if (!base64Regex.test(cleanedStr)) return false;
+
+    try {
+      // Try decoding and re-encoding to ensure it's valid Base64
+      return btoa(atob(cleanedStr)) === cleanedStr;
+    } catch (err) {
+      return false;
+    }
   }
 
   function getClosestDivIndex(targetDiv, divs) {
@@ -195,14 +260,14 @@
           if (typeof descriptor.value !== "function") {
             return;
           }
-          
+
           const original = descriptor.value;
           descriptor.value = function () {
 
             const ret = original.apply(this, arguments);
 
             if (null === changeAppVideo) {
-            
+
               for (let r of arguments) {
                 if (r?.api?.app) {
                   let fs = listFunctions(r.api.app);
@@ -218,7 +283,7 @@
                   } else {
                     const app = r.api.app;
                     const key = fs[0].key;
-                    changeAppVideo = function() {
+                    changeAppVideo = function () {
                       app[key](...arguments);
                     };
                   }
@@ -408,7 +473,7 @@
           params.set('pageToken', nextPageToken);
         }
         const url = `${API_BASE}/playlistItems?${params.toString()}`;
-        const response = await fetch(url);
+        const response = await apiFetch(url);
         const data = await processAPIResponse(response);
         allItems = allItems.concat(data.items);
         nextPageToken = data.nextPageToken || '';
@@ -477,7 +542,7 @@
       url.searchParams.set('id', ids);
       url.searchParams.set('key', API_KEY);
 
-      const response = await fetch(url.toString());
+      const response = await apiFetch(url.toString());
       const data = await processAPIResponse(response);
       allDetails = allDetails.concat(data.items);
     }
@@ -491,7 +556,7 @@
     ensureAPIKey();
     const url = `${API_BASE}/channels?part=contentDetails&id=${channelId}&key=${API_KEY}`;
     try {
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       const data = await processAPIResponse(response);
       if (data.items && data.items.length > 0) {
         let id = data.items[0].contentDetails.relatedPlaylists.uploads;
@@ -517,7 +582,7 @@
     ensureAPIKey();
     const url = `${API_BASE}/playlists?part=snippet&id=${playlistId}&key=${API_KEY}`;
     try {
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       const data = await processAPIResponse(response);
       if (data.items && data.items.length > 0) {
         const { title, channelTitle } = data.items[0].snippet;
@@ -534,7 +599,7 @@
     ensureAPIKey();
     const url = `${API_BASE}/channels?part=snippet&id=${channelId}&key=${API_KEY}`;
     try {
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       const data = await processAPIResponse(response);
       if (data.items && data.items.length > 0) {
         return data.items[0].snippet.title;
@@ -550,7 +615,7 @@
     ensureAPIKey();
     const url = `${API_BASE}/channels?part=snippet&forHandle=${handle}&key=${API_KEY}`;
     try {
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       const data = await processAPIResponse(response);
       if (data.items && data.items.length > 0) {
         return [data.items[0].id, data.items[0].snippet.title];
@@ -599,7 +664,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-      
+
     // --------- GLOBAL STATE ----------
     let currentMasterId = null;
 
@@ -906,7 +971,7 @@
       {
         let timeout = null;
         let startX, startY;
-        const dragTime = 500;
+        const dragTime = 300;
         const dragDiv = document.createElement("div");
         dragDiv.style.cssText = `
           position: absolute;
@@ -940,6 +1005,7 @@
             lastClosestIdx = null;
             originalDivs = Array.from(listContainer.querySelectorAll("& > div"));
             originalDraggedIdx = originalDivs.findIndex(a => a === itemDiv);
+            itemDiv.style.opacity = 0;
           }, dragTime);
         };
         modalContent.addEventListener("pointermove", throttle((ev) => {
@@ -971,6 +1037,7 @@
             modalContent.removeChild(dragDiv);
 
             const newSubPlaylists = newOrder
+              .forEach(itemDiv => itemDiv.style.opacity = "")
               .map(itemDiv => itemDiv.getAttribute("data-id"))
               .map(id => masterPlaylist.subPlaylists.find(sub => sub.id === id))
               .filter(Boolean);
@@ -1062,6 +1129,8 @@
 
           // Drag to move implementation
           itemDiv.addEventListener("pointerdown", (ev) => {
+            if (ev.target.closest("a") || ev.target.closest("button")) return;
+
             dragHandleLongpress(itemDiv, ev);
           });
         }
@@ -1079,6 +1148,9 @@
       `;
       logInfo(null);
       await refreshSubPlaylistList();
+      if (listContainer.scrollHeight > listContainer.clientHeight) {
+        listContainer.style.paddingRight = "0.5rem";
+      }
 
       // Input to add a new sub–playlist (accepts URL only)
       const newPlaylistInput = document.createElement("input");
@@ -1110,6 +1182,105 @@
       `;
       modalContent.appendChild(urlFormatDiv);
 
+      // Add subplaylist
+      const ADD_SUB_INVALID_ARG    = -1;
+      const ADD_SUB_ALREADY_EXISTS = -2;
+      async function addSubPlaylist({ id, type, title, url }={}) {
+        if (!id || !type || !title || !url) return ADD_SUB_INVALID_ARG;
+
+        // Push if not found, update if found
+        const sub = masterPlaylist.subPlaylists.find(x => x.id === id);
+        if (!sub) {
+          masterPlaylist.subPlaylists.push({ id, title, type, url });
+          masterPlaylists[masterId] = masterPlaylist;
+          saveMasterPlaylists(masterPlaylists);
+          // No always-renew cache
+          if (type === 'channel') {
+            await getCachedChannelPlaylist(id);
+          } else {
+            // type === 'playlist'
+            await getCachedSubPlaylist(id);
+          }
+          await refreshSubPlaylistList();
+
+          return true;
+        } else {
+          sub.title = title;
+          sub.url = url;
+          masterPlaylists[masterId] = masterPlaylist;
+          saveMasterPlaylists(masterPlaylists);
+
+          // Update listContainer
+          const a = listContainer.querySelector(`[data-id="${sub.id}"] a`);
+          if (a) {
+            a.textContent = sub.title;
+            a.href = sub.url;
+          }
+
+          return ADD_SUB_ALREADY_EXISTS;
+        }
+      }
+
+      // Import
+      async function tryImport(text) {
+        if (!isBase64(text)) return false;
+
+        let imported;
+        try {
+          imported = decompressData(text);
+          imported = JSON.parse(imported);
+        } catch {
+          alert("Malformed export data");
+          return false;
+        }
+
+        if (!imported.name || !imported.subPlaylists || !Array.isArray(imported.subPlaylists) || imported.subPlaylists.length === 0) {
+          alert("Malformed master playlist data");
+          return false;
+        }
+
+        // Change name if the current master is empty
+        if (masterPlaylist.subPlaylists.length === 0) {
+          masterPlaylist.name = imported.name;
+          titleDiv.textContent = masterPlaylist.name;
+          populateMasterSelect();
+        }
+
+        for (const sub of imported.subPlaylists) {
+          const res = await addSubPlaylist(sub);
+          if (res === ADD_SUB_INVALID_ARG) {
+            logError(`Failed to add subplaylist: "${JSON.stringify(sub)}"`, { showAlert:true });
+          }
+        }
+
+        return true;
+      }
+
+      // Drag to import
+      modalOverlay.addEventListener("dragover", (event) => event.preventDefault());
+      modalOverlay.addEventListener("drop", async (event) => {
+        event.preventDefault(); // Prevent default behavior (open in a new tab)
+        event.stopPropagation(); // Stop further event bubbling
+
+        const items = event.dataTransfer.items; // Get dropped items
+
+        if (!items) return;
+
+        for (const item of items) {
+          if (item.kind === "string") {
+            item.getAsString((text) => {
+              tryImport(text);
+            });
+            return;
+          } else if (item.kind === "file") {
+            const file = item.getAsFile();
+            if (file) {
+              await tryImport(await file.text());
+            }
+          }
+        }
+      });
+
       let newPlaylistInputRunning = false;
       newPlaylistInput.addEventListener('keypress', async (e) => {
         if (e.key !== 'Enter') return;
@@ -1120,107 +1291,84 @@
         }
         newPlaylistInputRunning = true;
         try {
-        await (async () => {
-          const inputValRaw = newPlaylistInput.value.trim();
-          if (inputValRaw === "") return;
-          let urlObj;
-          try {
-            urlObj = new URL(inputValRaw);
-          } catch (err) {
-            alert("Please enter a valid URL.");
-            return;
-          }
-          let id = null, type = null, title = null;
-          // Check for playlist URL first
-          if (urlObj.pathname.includes("playlist") && urlObj.searchParams.has("list")) {
-            id = urlObj.searchParams.get("list");
-            type = 'playlist';
-            title = await validatePlaylist(id);
-          } else if (urlObj.pathname.includes("/channel/")) {
-            // Extract channel id from URL (assuming URL like https://www.youtube.com/channel/CHANNEL_ID)
-            const parts = urlObj.pathname.split("/");
-            id = parts[parts.indexOf("channel") + 1];
-            type = 'channel';
-            title = await validateChannel(id);
-          } else if (urlObj.pathname.startsWith("/@")) {
-            const splits = urlObj.pathname.split("/");
-            const handle = splits[1].slice(1);
-            [id, title] = await validateChannelHandle(handle);
-
-            // Type
-            type = 'channel';
-            if (id && title && splits.length >= 3) {
-              if (splits[2] === "videos") {
-                type = 'playlist';
-                id = "UULF" + id.slice(2);
-                title = `[Videos] ${title}`;
-              } else if (splits[2] === "streams") {
-                type = 'playlist';
-                id = "UULV" + id.slice(2);
-                title = `[Live] ${title}`;
+          await (async () => {
+            const inputValRaw = newPlaylistInput.value.trim();
+            if (inputValRaw === "") return;
+            let urlObj;
+            try {
+              urlObj = new URL(inputValRaw);
+            } catch (err) {
+              if (tryImport(inputValRaw)) {
+                newPlaylistInput.value = "";
+                return;
               }
+              alert("Please enter a valid URL.");
+              return;
+            }
+            let id = null, type = null, title = null;
+            // Check for playlist URL first
+            if (urlObj.pathname.includes("playlist") && urlObj.searchParams.has("list")) {
+              id = urlObj.searchParams.get("list");
+              type = 'playlist';
+              title = await validatePlaylist(id);
+            } else if (urlObj.pathname.includes("/channel/")) {
+              // Extract channel id from URL (assuming URL like https://www.youtube.com/channel/CHANNEL_ID)
+              const parts = urlObj.pathname.split("/");
+              id = parts[parts.indexOf("channel") + 1];
+              type = 'channel';
+              title = await validateChannel(id);
+            } else if (urlObj.pathname.startsWith("/@")) {
+              const splits = urlObj.pathname.split("/");
+              const handle = splits[1].slice(1);
+              [id, title] = await validateChannelHandle(handle);
+
+              // Type
+              type = 'channel';
+              if (id && title && splits.length >= 3) {
+                if (splits[2] === "videos") {
+                  type = 'playlist';
+                  id = "UULF" + id.slice(2);
+                  title = `[Videos] ${title}`;
+                } else if (splits[2] === "streams") {
+                  type = 'playlist';
+                  id = "UULV" + id.slice(2);
+                  title = `[Live] ${title}`;
+                }
+              }
+
+              /** https://stackoverflow.com/questions/71192605/how-do-i-get-youtube-shorts-from-youtube-api-data-v3
+                prefix	contents
+                UULF	Videos
+                UULP	Popular videos
+                UULV	Live streams
+                UUMF	Members-only videos
+                UUMO	Members-only contents (videos, short videos and live streams)
+                UUMS	Members-only short videos
+                UUMV	Members-only live streams
+                UUPS	Popular short videos
+                UUPV	Popular live streams
+                UUSH	Short videos
+              */
+            }
+            if (!id || !type || !title) {
+              alert("Invalid URL or unable to validate the playlist/channel.");
+              return;
             }
 
-            /** https://stackoverflow.com/questions/71192605/how-do-i-get-youtube-shorts-from-youtube-api-data-v3
-              prefix	contents
-              UULF	Videos
-              UULP	Popular videos
-              UULV	Live streams
-              UUMF	Members-only videos
-              UUMO	Members-only contents (videos, short videos and live streams)
-              UUMS	Members-only short videos
-              UUMV	Members-only live streams
-              UUPS	Popular short videos
-              UUPV	Popular live streams
-              UUSH	Short videos
-            */
-          }
-          if (!id || !type || !title) {
-            alert("Invalid URL or unable to validate the playlist/channel.");
-            return;
-          }
-
-          // Push if not found, update if found
-          const sub = masterPlaylist.subPlaylists.find(x => x.id === id);
-          if (!sub) {
-            masterPlaylist.subPlaylists.push({
+            // Push if not found, update if found
+            const res = await addSubPlaylist({
               id: id,
               title: title,
               type: type,
               url: urlObj.toString()
             });
-            masterPlaylists[masterId] = masterPlaylist;
-            saveMasterPlaylists(masterPlaylists);
-            // No always-renew cache
-            if (type === 'channel') {
-              await getCachedChannelPlaylist(id);
-              //const videoIds = await fetchChannelVideoIds(id);
-              //saveCachedChannelPlaylist(id, videoIds);
-            } else {
-              // type === 'playlist'
-              await getCachedSubPlaylist(id);
-              //const videoIds = await fetchSubPlaylistVideoIds(id);
-              //saveCachedSubPlaylist(id, videoIds);
-            }
-            refreshSubPlaylistList();
-            newPlaylistInput.value = "";
-          } else {
-            sub.title = title;
-            sub.url = urlObj.toString();
-            masterPlaylists[masterId] = masterPlaylist;
-            saveMasterPlaylists(masterPlaylists);
-
-            // Update listContainer
-            const a = listContainer.querySelector(`[data-id="${sub.id}"] a`);
-            if (a) {
-              a.textContent = sub.title;
-              a.href = sub.url;
+            
+            if (res === ADD_SUB_ALREADY_EXISTS) {
+              alert("Playlist/Channel already added.");
             }
 
-            alert("Playlist/Channel already added.");
             newPlaylistInput.value = "";
-          }
-        })();
+          })();
         } finally {
           newPlaylistInputRunning = false;
         }
@@ -1228,23 +1376,16 @@
       });
 
       const buttons = document.createElement("div");
-      buttons.style.display = "flex";
-      buttons.style.justifyContent = "space-between";
+      buttons.style.cssText = `
+        display: flex;
+        margin-top: 1rem;
+      `;
       modalContent.appendChild(buttons);
-
-      // "Done" button to close the modal
-      const doneBtn = document.createElement("button");
-      doneBtn.textContent = "Done";
-      doneBtn.style.cssText = btnStyle + "margin-top: 1rem;";
-      doneBtn.addEventListener('click', () => {
-        document.body.removeChild(modalOverlay);
-      });
-      buttons.appendChild(doneBtn);
 
       // Red "Delete Master" button
       const deleteMasterBtn = document.createElement("button");
       deleteMasterBtn.textContent = "Delete Master";
-      deleteMasterBtn.style.cssText = btnStyle + "background: red; margin-top: 1rem;";
+      deleteMasterBtn.style.cssText = btnStyle + "background: red; margin-right: .8rem;";
       deleteMasterBtn.addEventListener('click', () => {
         if (confirm(`Are you sure you want to delete ${masterPlaylist.name}?`)) {
           delete masterPlaylists[masterId];
@@ -1257,6 +1398,38 @@
         }
       });
       buttons.appendChild(deleteMasterBtn);
+
+      // "Export" button to close the modal
+      const exportBtn = document.createElement("button");
+      exportBtn.textContent = "Export";
+      exportBtn.style.cssText = btnStyle;
+      exportBtn.addEventListener('click', () => {
+        let data = JSON.stringify(masterPlaylist, null, 2);
+        const blob = new Blob([compressData(data)], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `masterPlaylist-${masterPlaylist.name}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+      });
+      buttons.appendChild(exportBtn);
+
+      // Spacer
+      const buttonsSpacer = document.createElement("div");
+      buttonsSpacer.style.flex = "1";
+      buttons.appendChild(buttonsSpacer);
+
+      // "Done" button to close the modal
+      const doneBtn = document.createElement("button");
+      doneBtn.textContent = "Done";
+      doneBtn.style.cssText = btnStyle;
+      doneBtn.addEventListener('click', () => {
+        document.body.removeChild(modalOverlay);
+      });
+      buttons.appendChild(doneBtn);
+
     }
 
     editButton.addEventListener('click', () => {
@@ -1347,10 +1520,10 @@
       const videoId = shuffled[randomIndex].videoId;
 
       // Change page
-      const href   = `/watch?v=${videoId}`;
+      const href = `/watch?v=${videoId}`;
       const mpName = masterPlaylist.name.replaceAll(/\s/g, "_");
-      const i      = `(${randomIndex}/${mapping.length})`;
-      const hash   = `#${mpName}_${i}`;
+      const i = `(${randomIndex}/${mapping.length})`;
+      const hash = `#${mpName}_${i}`;
 
       // If player is visible
       if (player && isPlayerVisible(player)) {
@@ -1361,7 +1534,7 @@
         // - comments
         if (changeAppVideo) {
           changeAppVideo(videoId);
-          (async() => {
+          (async () => {
             for (let i = 1; i <= 25; i++) {
               if (window.location.href.includes(videoId)) {
                 history.replaceState({}, '', hash);
@@ -1371,8 +1544,8 @@
             }
           })();
 
-        // #ytd-player.getPlayer().loadVideoById only changes the video without changing the three
-        // so it is used as fallback here when the script has become deprecated
+          // #ytd-player.getPlayer().loadVideoById only changes the video without changing the three
+          // so it is used as fallback here when the script has become deprecated
         } else {
           markDeprecated();
           player.loadVideoById(videoId);
@@ -1408,7 +1581,7 @@
             onupdate = async () => {
               const d = player.getDuration();
               const ct = player.getCurrentTime();
-              const dct = ct-lastct;
+              const dct = ct - lastct;
               lastct = ct;
 
               // Detect manual time change
@@ -1424,8 +1597,8 @@
 
               // Refresh playlist in advance when nearing the end
               if ((d > 1200 && d - ct < 310 && d - ct > 90) ||
-                  (d > 600  && d - ct < 190 && d - ct > 90) ||
-                  (d > 300  && d - ct < 110 && d - ct > 90)) { // 2000+ channel takes tens of seconds to fetch
+                (d > 600 && d - ct < 190 && d - ct > 90) ||
+                (d > 300 && d - ct < 110 && d - ct > 90)) { // 2000+ channel takes tens of seconds to fetch
 
                 lastRefresh = now;
 
@@ -1442,9 +1615,9 @@
       }, 300);
     };
     onNavigate();
-    prevButton.addEventListener('click', () => {manualEnable(); nextVideo(-1)} );
-    nextButton.addEventListener('click', () => {manualEnable(); nextVideo()} );
-    
+    prevButton.addEventListener('click', () => { manualEnable(); nextVideo(-1) });
+    nextButton.addEventListener('click', () => { manualEnable(); nextVideo() });
+
   });
 
 })();
