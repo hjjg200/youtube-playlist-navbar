@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -47,6 +47,14 @@
 
     logError(`API Error: ${error.message}`, { showAlert: true, throwError: true });
 
+  }
+  
+  const deprecatedSpan = document.createElement("span");
+  deprecatedSpan.title = "This script is deprecated!";
+  deprecatedSpan.textContent = "⚠️";
+  deprecatedSpan.style.display = "none";
+  function markDeprecated() {
+    deprecatedSpan.style.display = "";
   }
 
   // --------- UTILITY FUNCTIONS: GZIP Compression ----------
@@ -162,6 +170,16 @@
     return chunks;
   }
 
+  function listFunctions(obj) { // enumerable
+    const funcs = [];
+    for (let key in obj) {
+      if (typeof obj[key] === 'function') {
+        funcs.push({ key, f: obj[key] });
+      }
+    }
+    return funcs;
+  }
+
   const trustPolicy = window.trustedTypes?.createPolicy('default', {
     createHTML: (input) => input
   });
@@ -175,20 +193,6 @@
     // This funciton is chosen because it is called like g.$B(this) when creating 'rp' or etc.
     // we're taking 'this' to examine its prototype and ultimately find api.iI
     const $Brgx = /{\w+.apply\(this,arguments\)}/;
-    // api.iI
-    // api.iI allows change of video by iI(videoId) without fully reloading the page like window.location.href
-    // regexp for api.iI found in the definition of rp.prototype.select
-    // rp.prototype.select is used for changing the page based on its suggestion prorperty
-    //     suggestion: { videoId: ..., playlistId: ..., sessionData: ..., ... }
-    // original usage
-    //     this.api.iI(this.suggestion.videoId,
-    //                 this.suggestion.sessionData,
-    //                 this.suggestion.playlistId,
-    //                 void 0, 
-    //                 void 0,
-    //                 this.suggestion.EF || void 0)
-
-    const iIrgx = /this\.api\.([^\(]+)\(.+videoId/;
     let $BFound = false;
 
     return new Proxy(value, {
@@ -204,17 +208,27 @@
               descriptor.value = function () {
                 if (arguments[0]) {
                   const r = arguments[0];
-                  if (typeof Object.getPrototypeOf(r)?.select === 'function') {
-                    let iI = r.select.toString().match(iIrgx);
-                    if (iI.length >= 2) {
-                      iI = iI[1];
-                      // Keep updating with newest instance's api object
-                      // it appears instances of removed DOM elements have broken function
+
+                  if (r.api) {
+                    let fs = listFunctions(r.api.app);
+                    fs = fs.filter(a => a.f.length >= 7);
+
+                    // Map { key, f, def }
+                    fs = fs.map(a => ({ ...a, def: a.f.toString() }));
+                    fs = fs.filter(a => a.def.includes("videoId"));
+                    fs = fs.filter(a => a.def.includes("loadPlaylist"));
+                    fs = fs.filter(a => a.def.includes("loadVideoByPlayerVars"));
+                    if (fs.length !== 1) {
+                      markDeprecated();
+                    } else {
+                      const app = r.api.app;
+                      const key = fs[0].key;
                       changeAppVideo = function() {
-                        r.api[iI](...arguments);
-                      }
+                        app[key](...arguments);
+                      };
                     }
                   }
+
                 }
                 $B.apply(this, arguments);
               }
@@ -647,6 +661,17 @@
       transform: translateY(1.2rem);
       line-height: 0;
     `;
+
+    // Deprecation
+    deprecatedSpan.style.cssText = deprecatedSpan.style.cssText + `
+      margin-right: 0.5rem;
+      transform: translateY(1rem);
+      line-height: 0;
+      pointer-events: all;
+      user-select: none;
+      font-size: 1.5rem;
+    `;
+    wrapperDiv.appendChild(deprecatedSpan);
 
     // Enabled check
     const enabeldSpan = document.createElement("span");
@@ -1298,19 +1323,8 @@
       }
 
       // Get player
-      const player = document.getElementById("ytd-player")?.getPlayer();
-
-      // Check state and visibility of player
-      if (player && player.getPlayerState() !== YT_PLAYER_STATE_ENDED) {
-        if (isPlayerVisible(player)) {
-          // If the video is visible and not yet ended
-          // make it manually end
-          // making it manually end is necessary to spawn <a> in its endscreen
-          // so that this script can use it to change the video without exiting the fullscreen mode
-          player.seekToStreamTime(player.getDuration());
-        }
-        // Invisible means that the user is on a site like main page or some other pages
-      }
+      const playerEl = document.getElementById("ytd-player");
+      const player = playerEl?.getPlayer();
 
       // Sanitize seed
       let seed = Date.now();
@@ -1343,31 +1357,33 @@
       const i = `(${randomIndex}/${mapping.length})`;
       const hash = `#${mpName}_${i}`;
 
-      for (let i = 0; i < 20; i++) {
-        const btns = Array.from(document.getElementById("ytd-player").querySelectorAll(".ytp-autonav-endscreen-countdown-overlay button"));
-        const cancelBtn = btns.find(el => el.textContent.trim().toLowerCase() === "cancel");
-        if (cancelBtn) cancelBtn.click();
+      // If player is visible
+      if (player && isPlayerVisible(player)) {
 
-        await new Promise(resolve => setTimeout(resolve, 250));
-
-        if (changeAppVideo) break;
-      }
-      if (!changeAppVideo) {
-        logError("Failed to get changeAppVideo function. This script is now deprecated!", { showAlert: true });
-      }
-
-      // If player is visible use changeAppVideo
-      if (changeAppVideo && player && isPlayerVisible(player)) {
-        changeAppVideo(videoId);
-        (async() => {
-          for (let i = 0; i < 25; i ++) {
-            await new Promise(resolve => setTimeout(resolve, 200));
-            if (window.location.href.includes(videoId)) {
-              history.pushState({}, '', hash);
-              return;
+        // changeAppVideo is private method of youtube app that can change video along with
+        // - page title
+        // - video info (ytd-watch-metadata)
+        // - comments
+        if (changeAppVideo) {
+          changeAppVideo(videoId);
+          (async() => {
+            for (let i = 0; i < 25; i ++) {
+              await new Promise(resolve => setTimeout(resolve, 200));
+              if (window.location.href.includes(videoId)) {
+                history.replaceState({}, '', hash);
+                return;
+              }
             }
-          }
-        })();
+          })();
+
+        // #ytd-player.getPlayer().loadVideoById only changes the video without changing the three
+        // so it is used as fallback here when the script has become deprecated
+        } else {
+          markDeprecated();
+          player.loadVideoById(videoId);
+          history.pushState({}, '', href + hash);
+        }
+
       } else {
         // This fully reloads the page
         window.location.href = href + hash;
