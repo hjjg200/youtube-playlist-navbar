@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -1405,16 +1405,35 @@
 
           // Refresh the cache when the end is near
           // to ensure cache is up to date when changing video
+          let lastRefresh = 0;
           const video = document.getElementById("ytd-player").querySelector("video");
           if (video) {
-            const d = player.getDuration();
+            let lastct = 0;
             let onupdate;
             onupdate = async () => {
+              const d = player.getDuration();
               const ct = player.getCurrentTime();
-              if ((d > 1200 && d - ct < 300) ||
-                (d > 600 && d - ct < 180) ||
-                (d > 300 && d - ct < 100)) { // 2000+ channel takes tens of seconds to fetch
-                video.removeEventListener("timeupdate", onupdate);
+              const dct = ct-lastct;
+              lastct = ct;
+
+              // Detect manual time change
+              if (Math.abs(dct) >= 2.0 * player.getPlaybackRate()) {
+                return;
+              }
+
+              // Check last refresh
+              const now = Date.now();
+              if (now - lastRefresh < 30 * 60 * 1000) {
+                return;
+              }
+
+              // Refresh playlist in advance when nearing the end
+              if ((d > 1200 && d - ct < 310 && d - ct > 90) ||
+                  (d > 600  && d - ct < 190 && d - ct > 90) ||
+                  (d > 300  && d - ct < 110 && d - ct > 90)) { // 2000+ channel takes tens of seconds to fetch
+
+                lastRefresh = now;
+
                 const masterPlaylists = getMasterPlaylists();
                 const masterPlaylist = masterPlaylists[currentMasterId];
                 if (masterPlaylist) {
@@ -1428,7 +1447,6 @@
       }, 300);
     };
     onNavigate();
-    navigation.addEventListener('navigate', () => onNavigate());
     prevButton.addEventListener('click', () => {manualEnable(); nextVideo(-1)} );
     nextButton.addEventListener('click', () => {manualEnable(); nextVideo()} );
     
