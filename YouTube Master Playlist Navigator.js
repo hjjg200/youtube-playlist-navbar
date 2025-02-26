@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -15,6 +15,7 @@
 
   // --------- CONFIGURATION & CONSTANTS ----------
   let API_KEY;
+  const API_BASE = "https://www.googleapis.com/youtube/v3";
   const CACHE_EXPIRY = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
   const CACHE_LARGE_EXPIRY = 24 * 60 * 60 * 1000; // 1 day for playlists with LARGE_SIZE+ videos
   const LARGE_SIZE = 1000; // 1000+ videos are considered large
@@ -184,16 +185,9 @@
     createHTML: (input) => input
   });
 
-  // --------- TRAP _yt_player -----------
-
+  // --------- TRAP _yt_player ---------
   let changeAppVideo = null;
   const TrapYTPlayer = (value) => {
-    // _yt_player.$B
-    // $B is used for capturing 'rp' or etc. that has prototype.select 
-    // This funciton is chosen because it is called like g.$B(this) when creating 'rp' or etc.
-    // we're taking 'this' to examine its prototype and ultimately find api.iI
-    const $Brgx = /{\w+.apply\(this,arguments\)}/;
-    let $BFound = false;
 
     return new Proxy(value, {
       defineProperty: (target, property, descriptor) => {
@@ -201,40 +195,40 @@
           if (typeof descriptor.value !== "function") {
             return;
           }
-          if (!$BFound) {
-            if ($Brgx.test(descriptor.value.toString())) {
+          
+          const original = descriptor.value;
+          descriptor.value = function () {
 
-              const $B = descriptor.value;
-              descriptor.value = function () {
-                if (arguments[0]) {
-                  const r = arguments[0];
+            const ret = original.apply(this, arguments);
 
-                  if (r.api) {
-                    let fs = listFunctions(r.api.app);
-                    fs = fs.filter(a => a.f.length >= 7);
+            if (null === changeAppVideo) {
+            
+              for (let r of arguments) {
+                if (r?.api?.app) {
+                  let fs = listFunctions(r.api.app);
+                  fs = fs.filter(a => a.f.length >= 7);
 
-                    // Map { key, f, def }
-                    fs = fs.map(a => ({ ...a, def: a.f.toString() }));
-                    fs = fs.filter(a => a.def.includes("videoId"));
-                    fs = fs.filter(a => a.def.includes("loadPlaylist"));
-                    fs = fs.filter(a => a.def.includes("loadVideoByPlayerVars"));
-                    if (fs.length !== 1) {
-                      markDeprecated();
-                    } else {
-                      const app = r.api.app;
-                      const key = fs[0].key;
-                      changeAppVideo = function() {
-                        app[key](...arguments);
-                      };
-                    }
+                  // Map { key, f, def }
+                  fs = fs.map(a => ({ ...a, def: a.f.toString() }));
+                  fs = fs.filter(a => a.def.includes("videoId"));
+                  fs = fs.filter(a => a.def.includes("loadPlaylist"));
+                  fs = fs.filter(a => a.def.includes("loadVideoByPlayerVars"));
+                  if (fs.length !== 1) {
+                    markDeprecated();
+                  } else {
+                    const app = r.api.app;
+                    const key = fs[0].key;
+                    changeAppVideo = function() {
+                      app[key](...arguments);
+                    };
                   }
-
                 }
-                $B.apply(this, arguments);
               }
-              $BFound = true;
-              return;
+
             }
+
+            return ret;
+
           }
 
         })();
@@ -245,7 +239,7 @@
   }
 
   Object.defineProperty(window, "_yt_player", {
-    value: TrapYTPlayer({}),
+    value: TrapYTPlayer(window._yt_player || {}),
   });
 
   // --------- MASTER PLAYLIST STORAGE ----------
@@ -386,7 +380,6 @@
    * @returns {Promise<string[]>} - Array of video IDs sorted by published date (latest first).
    */
   async function fetchSubPlaylistVideoIds(playlistId) {
-    const baseUrl = 'https://www.googleapis.com/youtube/v3';
     const maxResults = 50;
     let allItems = [];
     let nextPageToken = '';
@@ -414,7 +407,7 @@
         if (nextPageToken) {
           params.set('pageToken', nextPageToken);
         }
-        const url = `${baseUrl}/playlistItems?${params.toString()}`;
+        const url = `${API_BASE}/playlistItems?${params.toString()}`;
         const response = await fetch(url);
         const data = await processAPIResponse(response);
         allItems = allItems.concat(data.items);
@@ -474,13 +467,12 @@
    */
   async function getVideosDetails(videoIdArray) {
     ensureAPIKey();
-    const baseUrl = 'https://www.googleapis.com/youtube/v3';
     const chunked = chunkArray(videoIdArray, 50); // YouTube API supports max 50 ids per request.
     let allDetails = [];
 
     for (const chunk of chunked) {
       const ids = chunk.join(',');
-      const url = new URL(`${baseUrl}/videos`);
+      const url = new URL(`${API_BASE}/videos`);
       url.searchParams.set('part', 'snippet,contentDetails,statistics,liveStreamingDetails');
       url.searchParams.set('id', ids);
       url.searchParams.set('key', API_KEY);
@@ -497,7 +489,7 @@
   // For channel-based sub–playlists: get the channel's uploads playlist and fetch its videos.
   async function getUploadsPlaylistId(channelId) {
     ensureAPIKey();
-    const url = `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${channelId}&key=${API_KEY}`;
+    const url = `${API_BASE}/channels?part=contentDetails&id=${channelId}&key=${API_KEY}`;
     try {
       const response = await fetch(url);
       const data = await processAPIResponse(response);
@@ -523,7 +515,7 @@
   // Validate a playlist URL by YouTube API (returns "channelTitle - playlist title")
   async function validatePlaylist(playlistId) {
     ensureAPIKey();
-    const url = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&id=${playlistId}&key=${API_KEY}`;
+    const url = `${API_BASE}/playlists?part=snippet&id=${playlistId}&key=${API_KEY}`;
     try {
       const response = await fetch(url);
       const data = await processAPIResponse(response);
@@ -540,7 +532,7 @@
   // Validate a channel URL by YouTube API (returns channel title)
   async function validateChannel(channelId) {
     ensureAPIKey();
-    const url = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${channelId}&key=${API_KEY}`;
+    const url = `${API_BASE}/channels?part=snippet&id=${channelId}&key=${API_KEY}`;
     try {
       const response = await fetch(url);
       const data = await processAPIResponse(response);
@@ -556,7 +548,7 @@
   // Validate a channel handle by YouTube API (returns channel title)
   async function validateChannelHandle(handle) {
     ensureAPIKey();
-    const url = `https://www.googleapis.com/youtube/v3/channels?part=snippet&forHandle=${handle}&key=${API_KEY}`;
+    const url = `${API_BASE}/channels?part=snippet&forHandle=${handle}&key=${API_KEY}`;
     try {
       const response = await fetch(url);
       const data = await processAPIResponse(response);
@@ -657,7 +649,7 @@
     const spanStyle = `
       color: white;
       margin-right: 0.25rem;
-      opacity: 0.35;
+      opacity: 0.8;
       transform: translateY(1.2rem);
       line-height: 0;
     `;
@@ -700,7 +692,10 @@
     wrapperDiv.appendChild(shuffleSpan);
     const shuffleCheck = document.createElement("input");
     shuffleCheck.type = "checkbox";
-    shuffleCheck.style.pointerEvents = 'all';
+    shuffleCheck.style.cssText = `
+      pointer-events: all;
+      margin-right: 1rem;
+    `;
     shuffleCheck.checked = true;
     wrapperDiv.appendChild(shuffleCheck);
     const sessionShuffle = sessionStorage.getItem("tm_session_shuffle");
@@ -1352,10 +1347,10 @@
       const videoId = shuffled[randomIndex].videoId;
 
       // Change page
-      const href = `/watch?v=${videoId}`;
+      const href   = `/watch?v=${videoId}`;
       const mpName = masterPlaylist.name.replaceAll(/\s/g, "_");
-      const i = `(${randomIndex}/${mapping.length})`;
-      const hash = `#${mpName}_${i}`;
+      const i      = `(${randomIndex}/${mapping.length})`;
+      const hash   = `#${mpName}_${i}`;
 
       // If player is visible
       if (player && isPlayerVisible(player)) {
@@ -1367,12 +1362,12 @@
         if (changeAppVideo) {
           changeAppVideo(videoId);
           (async() => {
-            for (let i = 0; i < 25; i ++) {
-              await new Promise(resolve => setTimeout(resolve, 200));
+            for (let i = 1; i <= 25; i++) {
               if (window.location.href.includes(videoId)) {
                 history.replaceState({}, '', hash);
                 return;
               }
+              await new Promise(resolve => setTimeout(resolve, 20 * i));
             }
           })();
 
