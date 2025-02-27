@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.15
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -1183,9 +1183,9 @@
       modalContent.appendChild(urlFormatDiv);
 
       // Add subplaylist
-      const ADD_SUB_INVALID_ARG    = -1;
+      const ADD_SUB_INVALID_ARG = -1;
       const ADD_SUB_ALREADY_EXISTS = -2;
-      async function addSubPlaylist({ id, type, title, url }={}) {
+      async function addSubPlaylist({ id, type, title, url } = {}) {
         if (!id || !type || !title || !url) return ADD_SUB_INVALID_ARG;
 
         // Push if not found, update if found
@@ -1249,7 +1249,7 @@
         for (const sub of imported.subPlaylists) {
           const res = await addSubPlaylist(sub);
           if (res === ADD_SUB_INVALID_ARG) {
-            logError(`Failed to add subplaylist: "${JSON.stringify(sub)}"`, { showAlert:true });
+            logError(`Failed to add subplaylist: "${JSON.stringify(sub)}"`, { showAlert: true });
           }
         }
 
@@ -1362,7 +1362,7 @@
               type: type,
               url: urlObj.toString()
             });
-            
+
             if (res === ADD_SUB_ALREADY_EXISTS) {
               alert("Playlist/Channel already added.");
             }
@@ -1441,22 +1441,23 @@
     });
 
     // For shuffling
-    function seededShuffle(ary, seed) {
-      const result = [];
-      for (let i = 0; i < ary.length; i++) {
-        // Compute a deterministic random index between 0 and i (inclusive)
-        const pos = seededRandom(seed, i, i + 1);
-        result.splice(pos, 0, ary[i]);
-      }
-      return result;
+    function stableSeededSort(ary, seed) {
+      return ary
+        .map((item) => ({
+          item,
+          rank: seededHash(item.videoId, seed)
+        }))
+        .sort((a, b) => a.rank - b.rank)
+        .map(({ item }) => item);
     }
 
-    // A simple seeded random function: given a seed and an index,
-    // it returns an integer in [0, mod-1]. The fractional part of sin(seed+i) is used.
-    function seededRandom(seed, i, mod) {
-      const x = Math.sin(seed + i) * 10000;
-      const frac = x - Math.floor(x);
-      return Math.floor(frac * mod);
+    // A hashing function that produces a consistent pseudo-random rank for a given videoId
+    function seededHash(videoId, seed) {
+      let hash = 0;
+      for (let i = 0; i < videoId.length; i++) {
+        hash = (hash * 31 + videoId.charCodeAt(i)) >>> 0; // Simple hash function
+      }
+      return (Math.sin(seed + hash) * 10000) % 1; // Get a stable random order
     }
 
     function isPlayerVisible(player) {
@@ -1508,7 +1509,7 @@
       // this is because the uploads of a channel is sorted latest first
       // Shuffle uses deterministic random in such a manner that it assures additions of new videos
       // won't completely change the order of the shuffled list for a certain seed
-      const shuffled = shuffleCheck.checked ? seededShuffle(mapping, seed) : mapping;
+      const shuffled = shuffleCheck.checked ? stableSeededSort(mapping, seed) : mapping;
       let randomIndex = Date.now() % mapping.length;
       const currentVideoId = player?.getVideoData().video_id;
       if (currentVideoId) {
