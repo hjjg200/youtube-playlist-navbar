@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.15.1
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author
 // @match        https://*.youtube.com/*
@@ -195,12 +195,9 @@
     }
 
     console.error(msg);
-    if (showAlert) {
-      alert(msg);
-    }
-    if (throwError) {
-      throw new Error(msg);
-    }
+    if (showAlert) alert(msg);
+    if (throwError) throw new Error(msg);
+    
     return msg;
   }
 
@@ -560,9 +557,6 @@
       const data = await processAPIResponse(response);
       if (data.items && data.items.length > 0) {
         let id = data.items[0].contentDetails.relatedPlaylists.uploads;
-        if (id.startsWith("UC") || id.startsWith("UU")) {
-          //id = "UULF" + id.slice(2);
-        }
         return id;
       }
     } catch (e) {
@@ -1183,6 +1177,7 @@
       modalContent.appendChild(urlFormatDiv);
 
       // Add subplaylist
+      const ADD_SUB_OK = true;
       const ADD_SUB_INVALID_ARG = -1;
       const ADD_SUB_ALREADY_EXISTS = -2;
       async function addSubPlaylist({ id, type, title, url } = {}) {
@@ -1203,7 +1198,7 @@
           }
           await refreshSubPlaylistList();
 
-          return true;
+          return ADD_SUB_OK;
         } else {
           sub.title = title;
           sub.url = url;
@@ -1470,9 +1465,6 @@
     let nextVideoRedirected = false;
     const nextVideo = async (override = 1) => {
 
-      if (nextVideoRedirected) return;
-      nextVideoRedirected = true;
-
       if (!enabeldCheck.checked) return;
 
       if (!currentMasterId) {
@@ -1490,6 +1482,11 @@
         alert("No videos found in the selected playlists/channels.");
         return;
       }
+      
+      // Throttle
+      if (nextVideoRedirected) return;
+      nextVideoRedirected = true;
+      setTimeout(() => { nextVideoRedirected = false }, 500);
 
       // Get player
       const playerEl = document.getElementById("ytd-player");
@@ -1545,9 +1542,9 @@
             }
           })();
 
+        } else {
           // #ytd-player.getPlayer().loadVideoById only changes the video without changing the three
           // so it is used as fallback here when the script has become deprecated
-        } else {
           markDeprecated();
           player.loadVideoById(videoId);
           history.pushState({}, '', href + hash);
@@ -1558,9 +1555,9 @@
         window.location.href = href + hash;
       }
 
-      setTimeout(() => { nextVideoRedirected = false }, 500);
-
     };
+    prevButton.addEventListener('click', () => { manualEnable(); nextVideo(-1) });
+    nextButton.addEventListener('click', () => { manualEnable(); nextVideo() });
 
     const onNavigate = () => {
       let videoInterval = setInterval(() => {
@@ -1616,8 +1613,6 @@
       }, 300);
     };
     onNavigate();
-    prevButton.addEventListener('click', () => { manualEnable(); nextVideo(-1) });
-    nextButton.addEventListener('click', () => { manualEnable(); nextVideo() });
 
   });
 
