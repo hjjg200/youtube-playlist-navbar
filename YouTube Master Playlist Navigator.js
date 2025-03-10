@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.15.1
+// @version      0.15.2
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
-// @author
+// @author       https://github.com/hjjg200/youtube-playlist-navbar
 // @match        https://*.youtube.com/*
 // @run-at       document-start
 // @grant        none
@@ -1495,7 +1495,8 @@
       // Sanitize seed
       let seed = Date.now();
       if (seedInput.value) {
-        seed = parseInt(seedInput.value);
+        const sanitized = seedInput.value.trim().replaceAll(/[^\d]/g, "");
+        seed = parseInt(sanitized);
         seedInput.value = seed;
         seedInput.dispatchEvent(new Event("change"));
       }
