@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.15.2
+// @version      0.16
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author       https://github.com/hjjg200/youtube-playlist-navbar
 // @match        https://*.youtube.com/*
@@ -646,7 +646,12 @@
       } else {
         videoIds = await getCachedSubPlaylist(sub.id);
       }
-      for (let i = 0; i < videoIds.length; i++) {
+
+      // Add from the oldest video id
+      // Video IDs are stored in latest first order to match the original order of how vidoes are
+      // sorted in channel playlist, so in order to let the next video in the mapping be a more recent video,
+      // you need to invert its order
+      for (let i = videoIds.length - 1; i >= 0; i--) {
         const vid = videoIds[i];
         if (!seenVideoIds.has(vid)) {
           seenVideoIds.add(vid);
@@ -1502,9 +1507,6 @@
       }
 
       // Shuffle
-      mapping.reverse(); // reverse the mapping to make next video is more recent one
-      // assuming that the order is conventional latest first
-      // this is because the uploads of a channel is sorted latest first
       // Shuffle uses deterministic random in such a manner that it assures additions of new videos
       // won't completely change the order of the shuffled list for a certain seed
       const shuffled = shuffleCheck.checked ? stableSeededSort(mapping, seed) : mapping;
