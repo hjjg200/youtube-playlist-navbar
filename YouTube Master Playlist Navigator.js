@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author       https://github.com/hjjg200/youtube-playlist-navbar
 // @match        https://*.youtube.com/*
@@ -247,6 +247,148 @@
     createHTML: (input) => input
   });
 
+  (() => {
+    /**
+     * Encodes an integer (which may be negative) as a custom varint.
+     * The first byte: bit7 = continuation, bit6 = sign, bits0-5 = low 6 bits of abs value.
+     * Subsequent bytes: 7 bits per byte with MSB as continuation flag.
+     * @param {number} num - The integer to encode.
+     * @returns {number[]} - The encoded varint as an array of bytes.
+     */
+    function encodeSignedVarint(num) {
+      const bytes = [];
+      const sign = num < 0 ? 1 : 0;
+      let absNum = Math.abs(num);
+      
+      // Get the lower 6 bits of the number.
+      let firstData = absNum & 0x3F; // 0x3F is 63 (6 bits)
+      absNum >>>= 6;
+      
+      // Build first byte: set lower 6 bits and the sign bit.
+      let firstByte = firstData | (sign << 6);
+      if (absNum > 0) {
+        firstByte |= 0x80; // Set continuation flag if more bytes follow.
+      }
+      bytes.push(firstByte);
+      
+      // Encode remaining bits in 7-bit groups.
+      while (absNum > 0) {
+        let byte = absNum & 0x7F; // 7 bits of data.
+        absNum >>>= 7;
+        if (absNum > 0) {
+          byte |= 0x80; // Set continuation flag.
+        }
+        bytes.push(byte);
+      }
+      
+      return bytes;
+    }
+
+    /**
+     * Decodes our custom signed varint from an array of bytes.
+     * @param {number[]} bytes - The byte array.
+     * @returns {number} - The decoded integer.
+     */
+    function decodeSignedVarint(bytes) {
+      if (bytes.length === 0) throw new Error("Empty byte array");
+      
+      const firstByte = bytes[0];
+      const sign = (firstByte >> 6) & 0x01; // Extract sign bit.
+      let result = firstByte & 0x3F;         // Lower 6 bits of data.
+      let shift = 6;
+      let i = 1;
+      
+      while (i < bytes.length) {
+        const byte = bytes[i];
+        result |= (byte & 0x7F) << shift;
+        shift += 7;
+        i++;
+        if ((byte & 0x80) === 0) break;
+      }
+      
+      return sign ? -result : result;
+    }
+
+    /**
+     * Converts an array of bytes to a Base64 string.
+     * @param {number[]} bytes - Array of bytes.
+     * @returns {string} - Base64 string (with standard padding).
+     */
+    function byteArrayToBase64(bytes) {
+      const binary = String.fromCharCode(...bytes);
+      return btoa(binary);
+    }
+
+    /**
+     * Removes trailing '=' characters (padding) from a Base64 string.
+     * @param {string} base64Str - Base64 string with padding.
+     * @returns {string} - Base64 string without trailing '='.
+     */
+    function removePadding(base64Str) {
+      return base64Str.replace(/=+$/, '');
+    }
+
+    /**
+     * Adds '=' padding to a Base64 string until its length is a multiple of 4.
+     * @param {string} base64Str - Base64 string without padding.
+     * @returns {string} - Padded Base64 string.
+     */
+    function addPadding(base64Str) {
+      const remainder = base64Str.length % 4;
+      if (remainder === 0) return base64Str;
+      return base64Str + '='.repeat(4 - remainder);
+    }
+
+    /**
+     * Converts a Base64 string (without padding) to an array of bytes.
+     * @param {string} base64Str - Base64 string without padding.
+     * @returns {number[]} - Array of bytes.
+     */
+    function base64ToByteArray(base64Str) {
+      const padded = addPadding(base64Str);
+      const binary = atob(padded);
+      const bytes = [];
+      for (let i = 0; i < binary.length; i++) {
+        bytes.push(binary.charCodeAt(i));
+      }
+      return bytes;
+    }
+    
+    /**
+     * Encodes an integer (possibly negative) as a custom varint and returns a Base64 string without padding.
+     * @param {number} num - The integer to encode.
+     * @returns {string} - Base64 representation (no trailing '=' characters).
+     */
+    window.encodeVarintB64 = function(num) {
+    //function encodeSignedVarintToBase64(num) {
+      const bytes = encodeSignedVarint(num);
+      return removePadding(byteArrayToBase64(bytes));
+    }
+
+    /**
+     * Decodes a Base64 string (without padding) into an integer using our custom varint decoding.
+     * @param {string} base64Str - Base64 encoded varint (no padding).
+     * @returns {number} - The decoded integer.
+     */
+    window.decodeVarintB64 = function(base64Str) {
+    //function decodeSignedVarintFromBase64(base64Str) {
+      const bytes = base64ToByteArray(base64Str);
+      return decodeSignedVarint(bytes);
+    }
+  })();
+
+  function shortenTime(time, zero, divider) {
+    time = time - zero;
+    time = time / divider;
+    return Math.round(time);
+  }
+
+  function unshortenTime(short, zero, divider) {
+    short = short * divider;
+    short += zero;
+    return short;
+  }
+
   // --------- TRAP _yt_player ---------
   let changeAppVideo = null;
   const TrapYTPlayer = (value) => {
@@ -361,28 +503,30 @@
 
   // Now, we can implement the original functions using the helpers:
   const beingCachedKeyMap = {};
-  async function getCachedVideoIds(id, type) {
+  async function getCachedVideoInfos(id, type) {
     let cacheKey, fetcher, saver;
     if (type === "playlist") {
       cacheKey = 'tm_sub_playlist_' + id;
-      fetcher = fetchSubPlaylistVideoIds;
+      fetcher = fetchSubPlaylistVideoInfos;
       saver = saveCachedSubPlaylist;
     } else if (type === "channel") {
       cacheKey = 'tm_sub_playlist_channel_' + id;
-      fetcher = fetchChannelVideoIds;
+      fetcher = fetchChannelVideoInfos;
       saver = saveCachedChannelPlaylist;
     } else {
       throw new Error("Unexpected behavior");
     }
 
-    const [cached, stale] = getCachedData(cacheKey);
+    const [cachedMini, stale] = getCachedData(cacheKey);
+    const cached = cachedMini ? unminifyVideoInfos(cachedMini) : null;
+
     if (!cached) {
       for (let i = 0; i < 5; i++) {
-        const videoIds = await fetcher(id);
-        if (!videoIds) continue;
+        const videoInfos = await fetcher(id);
+        if (!videoInfos) continue;
 
-        saver(id, videoIds);
-        return videoIds;
+        saver(id, videoInfos);
+        return videoInfos;
       }
       logError(`Failed to fetch video ids for ${id} after 5 attempts`, { throwError: true });
     }
@@ -394,10 +538,10 @@
 
         let success = false;
         for (let i = 0; i < 5; i++) {
-          const videoIds = await fetcher(id);
-          if (!videoIds) continue;
+          const videoInfos = await fetcher(id);
+          if (!videoInfos) continue;
 
-          saver(id, videoIds);
+          saver(id, videoInfos);
           success = true;
           break;
         }
@@ -412,21 +556,100 @@
   }
 
   async function getCachedSubPlaylist(playlistId) {
-    return await getCachedVideoIds(playlistId, "playlist");
+    return await getCachedVideoInfos(playlistId, "playlist");
   }
 
-  function saveCachedSubPlaylist(playlistId, videoIds) {
+  function saveCachedSubPlaylist(playlistId, videoInfos) {
     const key = 'tm_sub_playlist_' + playlistId;
-    saveCachedData(key, videoIds);
+    const mini = minifyVideoInfos(videoInfos);
+    saveCachedData(key, mini);
   }
 
   async function getCachedChannelPlaylist(channelId) {
-    return await getCachedVideoIds(channelId, "channel");
+    return await getCachedVideoInfos(channelId, "channel");
   }
 
-  function saveCachedChannelPlaylist(channelId, videoIds) {
+  function saveCachedChannelPlaylist(channelId, videoInfos) {
     const key = 'tm_sub_playlist_channel_' + channelId;
-    saveCachedData(key, videoIds);
+    const mini = minifyVideoInfos(videoInfos);
+    saveCachedData(key, mini);
+  }
+
+  const minifyVideoInfosVersion = "v3.1";
+  const minifyVideoInfosMapping = [
+    {
+      key: 'id',
+      parser: null,
+      stringifier: null,
+      apiGetter: video => video.id
+    },
+    {
+      key: 'publishedAt',
+      parser: a => unshortenTime(decodeVarintB64(a), 1673136000000, 1000 * 60),
+      stringifier: v => encodeVarintB64(shortenTime(v, 1673136000000, 1000 * 60)),
+      apiGetter: video => (new Date(video.snippet.publishedAt)).getTime()
+    }
+  ];
+  const minifyVideoInfosHeader = minifyVideoInfosMapping.map(a => a.key).join("\t") + "\t" + minifyVideoInfosVersion;
+
+  function minifyVideoInfos(videoInfos) {
+
+    const header = minifyVideoInfosHeader;
+    
+    let mini = [header];
+    mini.push(...videoInfos.map(a => {
+      const items = [];
+      for (let i in minifyVideoInfosMapping) {
+        const m = minifyVideoInfosMapping[i];
+        let value = a[m.key];
+        if (value === undefined) {
+          logError(`${m.key} is not found in ${JSON.stringify(a)}`, {throwError: true} );
+        }
+
+        if (m.stringifier) {
+          value = m.stringifier(value);
+        }
+        items.push(value);
+      }
+      return items.join("\t");
+    }));
+    mini = mini.join("\n");
+    return mini;
+
+  }
+
+  function unminifyVideoInfos(mini) {
+    if (typeof mini !== "string") {
+      logError("The given minified video infos is not string");
+      return null;
+    }
+
+    let videoInfos = mini.split("\n");
+    const expectedHeader = minifyVideoInfosHeader;
+    if (videoInfos[0] !== expectedHeader) {
+      logError(`The given minified video infos do not have the right header got: "${videoInfos[0]}" expected: "${expectedHeader}"`);
+      return null;
+    }
+
+    // Slice
+    videoInfos = videoInfos.slice(1);
+    videoInfos = videoInfos.map(a => a.split("\t"));
+
+    if (videoInfos.some(a => a.length !== minifyVideoInfosMapping.length)) {
+      logError("The given minified video infos have some entries whose length does not match");
+      return null;
+    }
+
+    return videoInfos.map(a => {
+      const ret = {};
+      for (let i in minifyVideoInfosMapping) {
+        const m = minifyVideoInfosMapping[i];
+        const value = a[i];
+        ret[m.key] = m.parser ? m.parser(value) : value;
+      }
+      return ret;
+    });
+
   }
 
 
@@ -441,7 +664,7 @@
    * @param {string} playlistId - The ID of the playlist.
    * @returns {Promise<string[]>} - Array of video IDs sorted by published date (latest first).
    */
-  async function fetchSubPlaylistVideoIds(playlistId) {
+  async function fetchSubPlaylistVideoInfos(playlistId) {
     const maxResults = 50;
     let allItems = [];
     let nextPageToken = '';
@@ -512,13 +735,21 @@
       return broadcastStatus === 'none'; // "none" means it's neither live nor upcoming
     });
 
+    const videoInfos = filtered.map(video => {
+      const ret = {};
+      for (let i in minifyVideoInfosMapping) {
+        const m = minifyVideoInfosMapping[i];
+        ret[m.key] = m.apiGetter(video);
+      }
+      return ret;
+    });
     // 5. Sort videos by published date (latest first)
-    filtered.sort((a, b) => new Date(b.snippet.publishedAt) - new Date(a.snippet.publishedAt));
+    videoInfos.sort((a, b) => b.publishedAt - a.publishedAt);
 
     logInfo(null);
 
-    // 6. Return only the video IDs.
-    return filtered.map(video => video.id);
+    // 6. Return
+    return videoInfos;
   }
 
   /**
@@ -565,10 +796,10 @@
     return null;
   }
 
-  async function fetchChannelVideoIds(channelId) {
+  async function fetchChannelVideoInfos(channelId) {
     const uploadsPlaylistId = await getUploadsPlaylistId(channelId);
     if (!uploadsPlaylistId) return;
-    return await fetchSubPlaylistVideoIds(uploadsPlaylistId);
+    return await fetchSubPlaylistVideoInfos(uploadsPlaylistId);
   }
 
   // Validate a playlist URL by YouTube API (returns "channelTitle - playlist title")
@@ -640,22 +871,32 @@
     // duplicate video keys cause shuffle malfunction
     const seenVideoIds = new Set();
     for (let sub of masterPlaylist.subPlaylists) {
-      let videoIds;
+      let videoInfos;
       if (sub.type === 'channel') {
-        videoIds = await getCachedChannelPlaylist(sub.id);
+        videoInfos = await getCachedChannelPlaylist(sub.id);
       } else {
-        videoIds = await getCachedSubPlaylist(sub.id);
+        videoInfos = await getCachedSubPlaylist(sub.id);
       }
 
       // Add from the oldest video id
       // Video IDs are stored in latest first order to match the original order of how vidoes are
       // sorted in channel playlist, so in order to let the next video in the mapping be a more recent video,
       // you need to invert its order
-      for (let i = videoIds.length - 1; i >= 0; i--) {
-        const vid = videoIds[i];
+      for (let i = videoInfos.length - 1; i >= 0; i--) {
+        const info = videoInfos[i];
+        const vid = info.id;
         if (!seenVideoIds.has(vid)) {
           seenVideoIds.add(vid);
-          mapping.push({ id: sub.id, videoIndex: i, videoId: vid });
+          mapping.push({
+            _meta: {
+              subPlaylist: {
+                id: sub.id,
+                videoIndex: i
+              }
+            },
+            id: vid,
+            publishedAt: info.publishedAt
+          });
         }
       }
     }
@@ -1060,18 +1301,18 @@
           itemDiv.style.display = "flex";
           itemDiv.style.alignItems = "center";
           // Get video count from cache (or placeholder "..." if not available)
-          let videoIds;
+          let videoInfos;
           if (sub.type === 'channel') {
-            videoIds = await getCachedChannelPlaylist(sub.id);
+            videoInfos = await getCachedChannelPlaylist(sub.id);
           } else {
-            videoIds = await getCachedSubPlaylist(sub.id);
+            videoInfos = await getCachedSubPlaylist(sub.id);
           }
           const itemDivLeft = document.createElement("div");
           const itemDivRight = document.createElement("div");
           itemDiv.appendChild(itemDivLeft);
           itemDiv.appendChild(itemDivRight);
           itemDivLeft.style.flex = "1";
-          let count = videoIds ? videoIds.length : '...';
+          const count = videoInfos.length;
           const nameDiv = document.createElement("div");
           const nameA = document.createElement("a");
           nameA.textContent = sub.title;
@@ -1421,6 +1662,28 @@
       buttonsSpacer.style.flex = "1";
       buttons.appendChild(buttonsSpacer);
 
+      const aggregateDiv = document.createElement("div");
+      aggregateDiv.style.cssText = `
+        display: flex;
+        align-items: center;
+        font-size: 1rem;
+        margin-right: 1.2rem;
+        user-select: none;
+      `;
+      const aggregateCheck = document.createElement("input");
+      aggregateCheck.type = "checkbox";
+      aggregateCheck.addEventListener("change", () => {
+        masterPlaylist.aggregate = aggregateCheck.checked;
+        masterPlaylists[masterId] = masterPlaylist;
+        saveMasterPlaylists(masterPlaylists);
+      });
+      aggregateCheck.checked = masterPlaylist?.aggregate === true;
+      aggregateDiv.appendChild(aggregateCheck);
+      const aggregateSpan = document.createElement("span");
+      aggregateSpan.textContent = " Aggregate";
+      aggregateDiv.appendChild(aggregateSpan);
+      buttons.appendChild(aggregateDiv);
+
       // "Done" button to close the modal
       const doneBtn = document.createElement("button");
       doneBtn.textContent = "Done";
@@ -1445,7 +1708,7 @@
       return ary
         .map((item) => ({
           item,
-          rank: seededHash(item.videoId, seed)
+          rank: seededHash(item.id, seed)
         }))
         .sort((a, b) => a.rank - b.rank)
         .map(({ item }) => item);
@@ -1506,6 +1769,12 @@
         seedInput.dispatchEvent(new Event("change"));
       }
 
+      // Aggregated playlist
+      if (masterPlaylist.aggregate) {
+        // Sort all into oldest first order
+        mapping.sort((a, b) => a.publishedAt - b.publishedAt);
+      }
+
       // Shuffle
       // Shuffle uses deterministic random in such a manner that it assures additions of new videos
       // won't completely change the order of the shuffled list for a certain seed
@@ -1513,12 +1782,13 @@
       let randomIndex = Date.now() % mapping.length;
       const currentVideoId = player?.getVideoData().video_id;
       if (currentVideoId) {
-        const currentIndex = shuffled.findIndex(a => a.videoId === currentVideoId);
+        const currentIndex = shuffled.findIndex(video => video.id === currentVideoId);
         if (currentIndex !== -1) {
           randomIndex = (currentIndex + override + mapping.length) % mapping.length;
         }
       }
-      const videoId = shuffled[randomIndex].videoId;
+      const videoInfo = shuffled[randomIndex]; 
+      const videoId = videoInfo.id;
 
       // Change page
       const href = `/watch?v=${videoId}`;
