@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.17.1
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author       https://github.com/hjjg200/youtube-playlist-navbar
 // @match        https://*.youtube.com/*
@@ -471,15 +471,7 @@
       try {
         const obj = JSON.parse(data);
         const cachedData = decompressData(obj.compressedData);
-        let effectiveExpiry = CACHE_EXPIRY;
-        if (cachedData?.length && cachedData.length > LARGE_SIZE) {
-          effectiveExpiry = CACHE_LARGE_EXPIRY;
-        }
-        if (Date.now() - obj.timestamp < effectiveExpiry) {
-          return [cachedData, false];
-        } else {
-          return [cachedData, true];
-        }
+        return [cachedData, obj.timestamp];
       } catch (e) {
         logError(`Error decompressing cache for key: ${key} e: ${e}`);
       }
@@ -517,10 +509,13 @@
       throw new Error("Unexpected behavior");
     }
 
-    const [cachedMini, stale] = getCachedData(cacheKey);
+    const [cachedMini, timestamp] = getCachedData(cacheKey);
     const cached = cachedMini ? unminifyVideoInfos(cachedMini) : null;
+    let stale = null;
 
     if (!cached) {
+
+      // Null means no data at all
       for (let i = 0; i < 5; i++) {
         const videoInfos = await fetcher(id);
         if (!videoInfos) continue;
@@ -529,8 +524,20 @@
         return videoInfos;
       }
       logError(`Failed to fetch video ids for ${id} after 5 attempts`, { throwError: true });
+
+    } else {
+      
+      // Check if the cache is stale
+      let effectiveExpiry = CACHE_EXPIRY;
+      if (cached.length > LARGE_SIZE) {
+        effectiveExpiry = CACHE_LARGE_EXPIRY;
+      }
+      stale = Date.now() - timestamp > effectiveExpiry;
+
     }
-    if (stale) {
+
+    // If cache is stale
+    if (stale === true) {
       (async () => {
         // This lock mechanism assumes there is only one tab actively running this script
         if (beingCachedKeyMap[cacheKey]) return;
@@ -552,6 +559,7 @@
         beingCachedKeyMap[cacheKey] = false;
       })();
     }
+
     return cached;
   }
 
@@ -585,8 +593,8 @@
     },
     {
       key: 'publishedAt',
-      parser: a => unshortenTime(decodeVarintB64(a), 1673136000000, 1000 * 60),
-      stringifier: v => encodeVarintB64(shortenTime(v, 1673136000000, 1000 * 60)),
+      parser: a => unshortenTime(decodeVarintB64(a), 1673_136_000_000, 1000 * 60),
+      stringifier: v => encodeVarintB64(shortenTime(v, 1673_136_000_000, 1000 * 60)),
       apiGetter: video => (new Date(video.snippet.publishedAt)).getTime()
     }
   ];
