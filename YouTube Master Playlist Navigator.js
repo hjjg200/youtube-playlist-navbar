@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Master Playlist Navigator
 // @namespace    http://tampermonkey.net/
-// @version      0.17.1
+// @version      0.17.2
 // @description  Top bar for managing master playlists and navigating videos from sub–playlists on YouTube.
 // @author       https://github.com/hjjg200/youtube-playlist-navbar
 // @match        https://*.youtube.com/*
@@ -1030,12 +1030,17 @@
     seedInput.placeholder = "seed";
     seedInput.style.cssText = btnStyle + "width: 10rem;";
     wrapperDiv.appendChild(seedInput);
-    seedInput.addEventListener("change", () => {
-      manualEnable();
+    seedInput.addEventListener("input", () => {
+      const sanitized = seedInput.value.trim().replaceAll(/[^\d]/g, "");
+      const seed = parseInt(sanitized);
+      if (isNaN(seed)) {
+        seedInput.value = "";
+      } else {
+        seedInput.value = seed;
+      }
       localStorage.setItem('tm_current_seed', seedInput.value);
     });
-    const savedSeed = localStorage.getItem('tm_current_seed');
-    if (savedSeed) seedInput.value = savedSeed;
+    seedInput.value = localStorage.getItem('tm_current_seed') || "";
 
     // Populate the masterSelect from localStorage data
     function populateMasterSelect() {
@@ -1769,12 +1774,9 @@
       const player = playerEl?.getPlayer();
 
       // Sanitize seed
-      let seed = Date.now();
-      if (seedInput.value) {
-        const sanitized = seedInput.value.trim().replaceAll(/[^\d]/g, "");
-        seed = parseInt(sanitized);
-        seedInput.value = seed;
-        seedInput.dispatchEvent(new Event("change"));
+      let seed = parseInt(seedInput.value);
+      if (isNaN(seed)) {
+        seed = Date.now();
       }
 
       // Aggregated playlist
@@ -1801,7 +1803,7 @@
       // Change page
       const href = `/watch?v=${videoId}`;
       const mpName = masterPlaylist.name.replaceAll(/\s/g, "_");
-      const i = `(${randomIndex}/${mapping.length})`;
+      const i = `(${randomIndex + 1}/${mapping.length})`;
       const hash = `#${mpName}_${i}`;
 
       // If player is visible
